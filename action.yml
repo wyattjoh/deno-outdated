@@ -1,0 +1,161 @@
+name: "Deno Outdated"
+description: "Check for outdated Deno dependencies, update them, and open a pull request"
+
+inputs:
+  token:
+    description: "GitHub token for creating pull requests"
+    required: true
+  latest:
+    description: "Update beyond semver ranges to latest versions (default: false)"
+    required: false
+    default: "false"
+  base-branch:
+    description: "Base branch for the pull request (default: main)"
+    required: false
+    default: "main"
+  labels:
+    description: "Comma-separated labels to add to the pull request"
+    required: false
+    default: ""
+  branch:
+    description: "Branch name for the update PR (default: deps/deno-outdated)"
+    required: false
+    default: "deps/deno-outdated"
+  commit-message:
+    description: "Git commit message (default: deps: update deno dependencies)"
+    required: false
+    default: "deps: update deno dependencies"
+
+outputs:
+  updated:
+    description: "Whether any dependencies were updated (true/false)"
+    value: ${{ steps.update.outputs.updated }}
+  summary:
+    description: "Markdown summary of outdated dependencies"
+    value: ${{ steps.check.outputs.summary }}
+  pull-request-number:
+    description: "Number of the created/updated pull request (empty if none)"
+    value: ${{ steps.pr.outputs.number }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check for outdated dependencies
+      id: check
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Capture outdated output for the PR body.
+        outdated=$(deno outdated 2>&1) || true
+
+        if echo "$outdated" | grep -q "^┌"; then
+          echo "has_outdated=true" >> "$GITHUB_OUTPUT"
+
+          {
+            echo 'summary<<DENO_OUTDATED_EOF'
+            echo '## Outdated Dependencies'
+            echo ''
+            echo '```'
+            echo "$outdated"
+            echo '```'
+            echo 'DENO_OUTDATED_EOF'
+          } >> "$GITHUB_OUTPUT"
+        else
+          echo "has_outdated=false" >> "$GITHUB_OUTPUT"
+          echo "summary=No outdated dependencies found." >> "$GITHUB_OUTPUT"
+          echo "All dependencies are up to date."
+        fi
+
+    - name: Update dependencies
+      id: update
+      if: steps.check.outputs.has_outdated == 'true'
+      shell: bash
+      env:
+        INPUT_LATEST: ${{ inputs.latest }}
+      run: |
+        set -euo pipefail
+
+        if [ "$INPUT_LATEST" = "true" ]; then
+          deno outdated --update --latest
+        else
+          deno outdated --update
+        fi
+
+        # Check if files actually changed.
+        if git diff --quiet; then
+          echo "updated=false" >> "$GITHUB_OUTPUT"
+          echo "No file changes after update."
+        else
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "Dependencies updated successfully."
+        fi
+
+    - name: Create pull request
+      id: pr
+      if: steps.update.outputs.updated == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        INPUT_BRANCH: ${{ inputs.branch }}
+        INPUT_BASE: ${{ inputs.base-branch }}
+        INPUT_LABELS: ${{ inputs.labels }}
+        INPUT_COMMIT_MESSAGE: ${{ inputs.commit-message }}
+      run: |
+        set -euo pipefail
+
+        # Configure git identity if not already set.
+        if ! git config user.name > /dev/null 2>&1; then
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+        fi
+
+        # Check if the branch already exists on the remote.
+        if git ls-remote --exit-code origin "refs/heads/$INPUT_BRANCH" > /dev/null 2>&1; then
+          git fetch origin "$INPUT_BRANCH"
+          git checkout "$INPUT_BRANCH"
+          git reset --hard "origin/$INPUT_BASE"
+        else
+          git checkout -b "$INPUT_BRANCH"
+        fi
+
+        # Stage and commit.
+        git add deno.json deno.lock
+        git commit -m "$INPUT_COMMIT_MESSAGE"
+        git push --force-with-lease origin "$INPUT_BRANCH"
+
+        # Build label args.
+        label_args=""
+        if [ -n "$INPUT_LABELS" ]; then
+          IFS=',' read -ra LABELS <<< "$INPUT_LABELS"
+          for label in "${LABELS[@]}"; do
+            label_args="$label_args --label $(echo "$label" | xargs)"
+          done
+        fi
+
+        # Create or update the PR.
+        existing_pr=$(gh pr list --head "$INPUT_BRANCH" --base "$INPUT_BASE" --json number --jq '.[0].number // empty')
+
+        if [ -n "$existing_pr" ]; then
+          echo "number=$existing_pr" >> "$GITHUB_OUTPUT"
+          echo "Updated existing PR #$existing_pr"
+        else
+          pr_url=$(gh pr create \
+            --head "$INPUT_BRANCH" \
+            --base "$INPUT_BASE" \
+            --title "$INPUT_COMMIT_MESSAGE" \
+            --body "$(cat <<'BODY'
+        Automated dependency update via [`deno outdated --update`](https://docs.deno.com/runtime/reference/cli/outdated/).
+
+        This PR updates dependencies in `deno.json` and regenerates `deno.lock`.
+        BODY
+          )" \
+            $label_args)
+
+          pr_number=$(echo "$pr_url" | grep -oE '[0-9]+$')
+          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "Created PR #$pr_number"
+        fi
+
+        # Return to the base branch.
+        git checkout "$INPUT_BASE"

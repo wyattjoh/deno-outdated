@@ -1,0 +1,118 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-outdated-check:
+    name: Detect outdated dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Create test fixture
+        run: |
+          mkdir -p test
+          cat > test/deno.json << 'EOF'
+          {
+            "imports": {
+              "zod": "npm:zod@^3.20.0"
+            }
+          }
+          EOF
+          cd test && deno install
+
+      - name: Run outdated check
+        id: check
+        working-directory: test
+        shell: bash
+        run: |
+          outdated=$(deno outdated 2>&1) || true
+          if echo "$outdated" | grep -q "^┌"; then
+            echo "PASS: detected outdated dependencies"
+            echo "$outdated"
+          else
+            echo "FAIL: expected outdated dependencies to be detected"
+            exit 1
+          fi
+
+  test-update:
+    name: Update dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Create test fixture with outdated dep
+        run: |
+          mkdir -p test
+          cat > test/deno.json << 'EOF'
+          {
+            "imports": {
+              "zod": "npm:zod@^3.20.0"
+            }
+          }
+          EOF
+          cd test && deno install
+
+      - name: Run update
+        working-directory: test
+        run: deno outdated --update
+
+      - name: Verify lockfile was updated
+        working-directory: test
+        run: |
+          if git diff --quiet deno.lock; then
+            echo "FAIL: expected deno.lock to be modified"
+            exit 1
+          fi
+          echo "PASS: deno.lock was updated"
+
+  test-no-op:
+    name: No-op when up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Create test fixture at latest
+        run: |
+          mkdir -p test
+          cat > test/deno.json << 'EOF'
+          {
+            "imports": {
+              "@std/assert": "jsr:@std/assert@^1"
+            }
+          }
+          EOF
+          cd test && deno install
+
+      - name: Run update
+        working-directory: test
+        run: deno outdated --update
+
+      - name: Verify no changes
+        working-directory: test
+        run: |
+          if ! git diff --quiet deno.lock 2>/dev/null; then
+            echo "INFO: lockfile changed (expected if first install)"
+          fi
+          outdated=$(deno outdated 2>&1) || true
+          if echo "$outdated" | grep -q "^┌"; then
+            echo "FAIL: still has outdated dependencies after update"
+            exit 1
+          fi
+          echo "PASS: no outdated dependencies"
