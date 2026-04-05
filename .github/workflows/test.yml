@@ -64,6 +64,7 @@ jobs:
           }
           EOF
           cd test && deno install
+          git add -A && git commit -m "test: add fixture"
 
       - name: Run update
         working-directory: test
