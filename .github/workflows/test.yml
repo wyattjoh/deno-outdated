@@ -55,6 +55,8 @@ jobs:
 
       - name: Create test fixture with outdated dep
         run: |
+          git config user.name "test"
+          git config user.email "test@test.com"
           mkdir -p test
           cat > test/deno.json << 'EOF'
           {
